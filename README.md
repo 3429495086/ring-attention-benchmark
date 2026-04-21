@@ -269,3 +269,5 @@ avg_total=24.677 ms avg_D2H=0.027 avg_MPI=0.080 avg_H2D=0.028 avg_attn=24.218 av
 - GPU selection inside the CUDA code is based on local rank, not global rank.
 - `benchmark_comm.sh` and `benchmark_attention.sh` print headers only from rank 0 to keep logs readable.
 - If `NP` differs from the detected MPI world size, the detected world size wins.
+
+Yu Gang - Ring Attention Multi-GPU Parallelization Research
