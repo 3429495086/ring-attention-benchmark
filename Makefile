@@ -1,6 +1,9 @@
 # Ring Attention Benchmark - Makefile
 # Supports: staged MPI, staged MPI Isend/Irecv, CUDA-aware MPI, CUDA-aware MPI Isend/Irecv, NCCL
 
+CONFIG ?= benchmark.env
+-include $(CONFIG)
+
 # ============ Configuration (override for your system if needed) ============
 CUDA_HOME    ?=
 MPI_HOME     ?=
@@ -12,17 +15,30 @@ MPICXX       ?= mpicxx
 NVCCFLAGS    ?= -O3
 NORMALIZE_NVCC_LINK_FLAGS := ./scripts/normalize_nvcc_link_flags.sh
 
-RAW_MPI_INC  := $(strip $(shell $(MPICXX) --showme:compile 2>/dev/null))
-RAW_MPI_LIB  := $(strip $(shell $(MPICXX) --showme:link 2>/dev/null || echo -lmpi))
+strip-trailing-slash = $(patsubst %/,%,$(1))
 
-DEFAULT_MPI_INC := $(if $(RAW_MPI_INC),$(RAW_MPI_INC),$(if $(MPI_HOME),-I$(MPI_HOME)/include,))
-DEFAULT_MPI_LIB := $(if $(RAW_MPI_LIB),$(shell $(NORMALIZE_NVCC_LINK_FLAGS) $(RAW_MPI_LIB)),$(if $(MPI_HOME),-L$(MPI_HOME)/lib -lmpi,-lmpi))
+MPI_HOME_CLEAN  := $(call strip-trailing-slash,$(MPI_HOME))
+NCCL_HOME_CLEAN := $(call strip-trailing-slash,$(NCCL_HOME))
+
+MPI_INC_DIR := $(if $(MPI_HOME_CLEAN),$(if $(wildcard $(MPI_HOME_CLEAN)/include),$(MPI_HOME_CLEAN)/include,$(MPI_HOME_CLEAN)/include),)
+MPI_LIB_DIR := $(if $(MPI_HOME_CLEAN),$(if $(wildcard $(MPI_HOME_CLEAN)/lib),$(MPI_HOME_CLEAN)/lib,$(if $(wildcard $(MPI_HOME_CLEAN)/lib64),$(MPI_HOME_CLEAN)/lib64,$(MPI_HOME_CLEAN)/lib)),)
+MPI_CXX_LIB_PRESENT := $(if $(MPI_LIB_DIR),$(strip $(wildcard $(MPI_LIB_DIR)/libmpi_cxx.*)),)
+
+NCCL_INC_DIR := $(if $(NCCL_HOME_CLEAN),$(if $(wildcard $(NCCL_HOME_CLEAN)/include),$(NCCL_HOME_CLEAN)/include,$(NCCL_HOME_CLEAN)/include),)
+NCCL_LIB_DIR := $(if $(NCCL_HOME_CLEAN),$(if $(wildcard $(NCCL_HOME_CLEAN)/lib),$(NCCL_HOME_CLEAN)/lib,$(if $(wildcard $(NCCL_HOME_CLEAN)/lib64),$(NCCL_HOME_CLEAN)/lib64,$(NCCL_HOME_CLEAN)/lib)),)
+
+RAW_MPI_INC  := $(strip $(shell $(MPICXX) --showme:compile 2>/dev/null))
+RAW_MPI_LIB  := $(strip $(shell $(MPICXX) --showme:link 2>/dev/null))
+NORMALIZED_RAW_MPI_LIB := $(if $(RAW_MPI_LIB),$(shell $(NORMALIZE_NVCC_LINK_FLAGS) $(RAW_MPI_LIB)),)
+
+DEFAULT_MPI_INC := $(if $(MPI_HOME_CLEAN),-I$(MPI_INC_DIR),$(RAW_MPI_INC))
+DEFAULT_MPI_LIB := $(if $(MPI_HOME_CLEAN),-L$(MPI_LIB_DIR) $(if $(MPI_CXX_LIB_PRESENT),-lmpi_cxx,) -lmpi,$(if $(NORMALIZED_RAW_MPI_LIB),$(NORMALIZED_RAW_MPI_LIB),-lmpi))
 
 MPI_INC      ?= $(DEFAULT_MPI_INC)
 MPI_LIB      ?= $(DEFAULT_MPI_LIB)
 
-NCCL_INC     ?= $(if $(NCCL_HOME),-I$(NCCL_HOME)/include,)
-NCCL_LIB     ?= $(if $(NCCL_HOME),-L$(NCCL_HOME)/lib -lnccl,-lnccl)
+NCCL_INC     ?= $(if $(NCCL_HOME_CLEAN),-I$(NCCL_INC_DIR),)
+NCCL_LIB     ?= $(if $(NCCL_HOME_CLEAN),-L$(NCCL_LIB_DIR) -lnccl,-lnccl)
 
 # ============ Directories ============
 SRC_ATTN     := src/attention
@@ -60,11 +76,14 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 print-config:
+	@echo "CONFIG=$(CONFIG)"
 	@echo "NVCC=$(NVCC)"
 	@echo "MPICXX=$(MPICXX)"
 	@echo "NVCCFLAGS=$(NVCCFLAGS)"
+	@echo "MPI_HOME=$(MPI_HOME)"
 	@echo "MPI_INC=$(MPI_INC)"
 	@echo "MPI_LIB=$(MPI_LIB)"
+	@echo "NCCL_HOME=$(NCCL_HOME)"
 	@echo "NCCL_INC=$(NCCL_INC)"
 	@echo "NCCL_LIB=$(NCCL_LIB)"
 
@@ -115,7 +134,8 @@ help:
 	@echo "  make clean      - Remove all built files"
 	@echo "  make help       - Show this message"
 	@echo ""
-	@echo "Configuration (override with environment or command line):"
+	@echo "Configuration (auto-loads benchmark.env when present):"
+	@echo "  CONFIG=$(CONFIG)"
 	@echo "  CUDA_HOME=$(CUDA_HOME)"
 	@echo "  MPI_HOME=$(MPI_HOME)"
 	@echo "  NCCL_HOME=$(NCCL_HOME)"
@@ -123,4 +143,6 @@ help:
 	@echo "  MPICXX=$(MPICXX)"
 	@echo ""
 	@echo "Example:"
-	@echo "  CUDA_HOME=/usr/local/cuda MPI_HOME=/opt/openmpi NCCL_HOME=/opt/nccl make all"
+	@echo "  cp config.example.env benchmark.env"
+	@echo "  make print-config"
+	@echo "  make all"

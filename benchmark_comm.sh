@@ -1,88 +1,77 @@
 #!/bin/bash
-# benchmark_comm.sh - Run communication-only (loop) benchmarks across all backends
+# benchmark_comm.sh - Run communication-only (loop) benchmarks inside an externally launched MPI job.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/scripts/launcher.sh"
+source "${SCRIPT_DIR}/scripts/mpi_env.sh"
 
-ensure_benchmark_wrapper_not_started_via_parallel_srun "benchmark_comm.sh"
+CONFIG=${CONFIG:-benchmark.env}
+source_config_preserving_env "${CONFIG}" CONFIG NP WARMUP ITERS SIZES BACKENDS
 
-# ============ Configuration ============
-NP=${NP:-2}
+DETECTED_NP="$(detect_world_size 2>/dev/null || true)"
+NP=${NP:-${DETECTED_NP:-1}}
+if [ -n "${DETECTED_NP}" ] && [ "${NP}" != "${DETECTED_NP}" ]; then
+  log_primary "WARN: NP=${NP} differs from detected world size=${DETECTED_NP}; using detected size."
+  NP="${DETECTED_NP}"
+fi
+
+if [ "${NP}" -gt 1 ] && ! under_mpi_launcher; then
+  echo "ERROR: benchmark_comm.sh must be launched externally with mpirun/srun when NP=${NP}." >&2
+  exit 1
+fi
+
 WARMUP=${WARMUP:-10}
 ITERS=${ITERS:-100}
-MPIRUN_EXTRA_ARGS=${MPIRUN_EXTRA_ARGS:-}
-HOSTFILE=${HOSTFILE:-}
-SRUN_EXTRA_ARGS=${SRUN_EXTRA_ARGS:-}
-LAUNCHER_KIND="$(resolve_launcher)" || exit 1
-build_launcher_command "${LAUNCHER_KIND}" || exit 1
-
-# KV shard sizes in bytes
 SIZES=${SIZES:-"262144 524288 1048576 4194304 16777216"}
 BACKENDS=${BACKENDS:-"staged staged_Isendrecv cuda_aware cuda_aware_Isendrecv nccl"}
 
 BIN_DIR="${SCRIPT_DIR}/bin"
 
-# ============ Backend executables ============
-declare -A EXES=(
-  [staged]=${BIN_DIR}/ring_loop_staged
-  [staged_Isendrecv]=${BIN_DIR}/ring_loop_staged_Isendrecv
-  [cuda_aware]=${BIN_DIR}/ring_loop_cuda_aware
-  [cuda_aware_Isendrecv]=${BIN_DIR}/ring_loop_cuda_aware_Isendrecv
-  [nccl]=${BIN_DIR}/ring_loop_nccl
-)
+backend_exe() {
+  case "$1" in
+    staged) printf '%s\n' "${BIN_DIR}/ring_loop_staged" ;;
+    staged_Isendrecv) printf '%s\n' "${BIN_DIR}/ring_loop_staged_Isendrecv" ;;
+    cuda_aware) printf '%s\n' "${BIN_DIR}/ring_loop_cuda_aware" ;;
+    cuda_aware_Isendrecv) printf '%s\n' "${BIN_DIR}/ring_loop_cuda_aware_Isendrecv" ;;
+    nccl) printf '%s\n' "${BIN_DIR}/ring_loop_nccl" ;;
+    *) return 1 ;;
+  esac
+}
 
-# ============ Run benchmarks ============
-echo "========== Communication (Loop) Benchmark =========="
-echo "Date: $(date)"
-echo "Hostname: $(hostname)"
-echo "launcher: ${LAUNCHER_KIND}"
-echo "launcher_bin: ${LAUNCH_BIN}"
-echo "launcher_args: ${LAUNCH_ARGS[*]:-(none)}"
-echo "np=${NP} warmup=${WARMUP} iters=${ITERS}"
-echo "sizes=${SIZES}"
-echo "backends=${BACKENDS}"
-echo ""
+log_primary "========== Communication (Loop) Benchmark =========="
+log_primary "Date: $(date)"
+log_primary "Hostname: $(hostname)"
+log_primary "np=${NP} warmup=${WARMUP} iters=${ITERS}"
+log_primary "sizes=${SIZES}"
+log_primary "backends=${BACKENDS}"
+log_primary ""
 
 for backend in ${BACKENDS}; do
-  if [[ -z "${EXES[$backend]+set}" ]]; then
-    echo "SKIP backend=${backend} (unknown backend)"
-    echo ""
+  if ! exe="$(backend_exe "${backend}")"; then
+    log_primary "SKIP backend=${backend} (unknown backend)"
+    log_primary ""
     continue
   fi
 
-  exe="${EXES[$backend]}"
   if [[ ! -x "${exe}" ]]; then
-    echo "SKIP backend=${backend} (executable not found: ${exe})"
-    echo ""
+    log_primary "SKIP backend=${backend} (executable not found: ${exe})"
+    log_primary ""
     continue
   fi
 
-  echo "===== backend=${backend} ====="
+  log_primary "===== backend=${backend} ====="
   for size in ${SIZES}; do
-    echo "--- kv_size=${size} bytes ---"
-    case "${LAUNCHER_KIND}" in
-      mpirun)
-        "${LAUNCH_BIN}" "${LAUNCH_ARGS[@]}" -np "${NP}" "${exe}" "${size}" "${WARMUP}" "${ITERS}" || {
-            echo "ERROR: ${backend} failed with kv_size=${size}"
-        }
-        ;;
-      srun)
-        "${LAUNCH_BIN}" "${LAUNCH_ARGS[@]}" -n "${NP}" "${exe}" "${size}" "${WARMUP}" "${ITERS}" || {
-            echo "ERROR: ${backend} failed with kv_size=${size}"
-        }
-        ;;
-      *)
-        echo "ERROR: unsupported launcher=${LAUNCHER_KIND}"
-        exit 1
-        ;;
-    esac
+    log_primary "--- kv_size=${size} bytes ---"
+    if ! "${exe}" "${size}" "${WARMUP}" "${ITERS}"; then
+      log_primary "ERROR: ${backend} failed with kv_size=${size}"
+      exit 1
+    fi
   done
-  echo ""
+  log_primary ""
 done
 
-echo "========== Done =========="
-echo "Finished at: $(date)"
+log_primary "========== Done =========="
+log_primary "Finished at: $(date)"

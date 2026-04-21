@@ -1,39 +1,23 @@
 #!/bin/bash
-# Build, collect environment, and run the benchmark matrix.
+# Preparation mode: build, collect env, and generate launch examples.
+# Worker mode: when started by mpirun/srun, run the selected benchmark family directly.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/scripts/launcher.sh"
+source "${SCRIPT_DIR}/scripts/mpi_env.sh"
 
 CONFIG=${CONFIG:-benchmark.env}
-if [ -f "${CONFIG}" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "${CONFIG}"
-  set +a
-fi
-
-ensure_run_suite_not_started_via_parallel_srun
-
-LAUNCHER_KIND="$(resolve_launcher)" || exit 1
-build_launcher_command "${LAUNCHER_KIND}" || exit 1
-LAUNCHER_SUMMARY="$(launcher_summary "${LAUNCHER_KIND}")"
-
-if [ "${LAUNCHER_KIND}" = "mpirun" ]; then
-  MPIRUN="${LAUNCH_BIN}"
-fi
-if [ "${LAUNCHER_KIND}" = "srun" ]; then
-  SRUN="${LAUNCH_BIN}"
-fi
+source_config_preserving_env "${CONFIG}" \
+  CONFIG RUN_LABEL RESULTS_ROOT NP_LIST RUN_TYPES WARMUP ITERS BACKENDS \
+  COMM_SIZES ATTENTION_SIZES BUILD COLLECT_ENV HOSTFILE MPIRUN MPIRUN_EXTRA_ARGS \
+  SRUN SRUN_MPI_TYPE SRUN_EXTRA_ARGS PREPARE_ONLY
 
 RUN_LABEL=${RUN_LABEL:-"$(hostname)_$(date +%Y%m%d_%H%M%S)"}
 RESULTS_ROOT=${RESULTS_ROOT:-"${SCRIPT_DIR}/results"}
 RUN_DIR="${RESULTS_ROOT}/${RUN_LABEL}"
-mkdir -p "${RUN_DIR}"
-
 NP_LIST=${NP_LIST:-"2"}
 RUN_TYPES=${RUN_TYPES:-"comm attention"}
 WARMUP=${WARMUP:-10}
@@ -43,89 +27,174 @@ COMM_SIZES=${COMM_SIZES:-"262144 524288 1048576 4194304 16777216"}
 ATTENTION_SIZES=${ATTENTION_SIZES:-"262144 524288 1048576 4194304"}
 BUILD=${BUILD:-1}
 COLLECT_ENV=${COLLECT_ENV:-1}
-MPIRUN_EXTRA_ARGS=${MPIRUN_EXTRA_ARGS:-}
 HOSTFILE=${HOSTFILE:-}
-SRUN_EXTRA_ARGS=${SRUN_EXTRA_ARGS:-}
+MPIRUN=${MPIRUN:-mpirun}
+MPIRUN_EXTRA_ARGS=${MPIRUN_EXTRA_ARGS:-}
+SRUN=${SRUN:-srun}
 SRUN_MPI_TYPE=${SRUN_MPI_TYPE:-}
+SRUN_EXTRA_ARGS=${SRUN_EXTRA_ARGS:-}
+PREPARE_ONLY=${PREPARE_ONLY:-0}
 
-{
-  echo "run_label=${RUN_LABEL}"
-  echo "date=$(date)"
-  echo "hostname=$(hostname)"
-  echo "script_dir=${SCRIPT_DIR}"
-  echo "launcher=${LAUNCHER_KIND}"
-  echo "launcher_request=${LAUNCHER:-auto}"
-  echo "launcher_command=${LAUNCHER_SUMMARY}"
-  echo "mpirun=${MPIRUN:-}"
-  echo "srun=${SRUN:-}"
-  echo "hostfile=${HOSTFILE:-}"
-  echo "mpirun_extra_args=${MPIRUN_EXTRA_ARGS:-}"
-  echo "srun_extra_args=${SRUN_EXTRA_ARGS:-}"
-  echo "srun_mpi_type=${SRUN_MPI_TYPE:-}"
-  echo "np_list=${NP_LIST}"
-  echo "run_types=${RUN_TYPES}"
-  echo "warmup=${WARMUP}"
-  echo "iters=${ITERS}"
-  echo "backends=${BACKENDS}"
-  echo "comm_sizes=${COMM_SIZES}"
-  echo "attention_sizes=${ATTENTION_SIZES}"
-} > "${RUN_DIR}/manifest.txt"
-
-echo "Results directory: ${RUN_DIR}"
-echo "Launcher: ${LAUNCHER_SUMMARY}"
-
-if [ "${BUILD}" = "1" ]; then
-  echo "Building benchmarks..."
-  make all 2>&1 | tee "${RUN_DIR}/build.log"
+if [[ "${CONFIG}" = /* ]]; then
+  CONFIG_PATH="${CONFIG}"
 else
-  echo "Skipping build because BUILD=${BUILD}."
+  CONFIG_PATH="${SCRIPT_DIR}/${CONFIG}"
 fi
 
-if [ "${COLLECT_ENV}" = "1" ]; then
-  echo "Collecting local environment..."
-  ./collect_env.sh > "${RUN_DIR}/env_local.txt" 2>&1 || true
-fi
+write_manifest() {
+  cat > "${RUN_DIR}/manifest.txt" <<EOF
+run_label=${RUN_LABEL}
+date=$(date)
+hostname=$(hostname)
+script_dir=${SCRIPT_DIR}
+execution_model=external_launcher
+config=${CONFIG}
+results_root=${RESULTS_ROOT}
+run_dir=${RUN_DIR}
+np_list=${NP_LIST}
+run_types=${RUN_TYPES}
+warmup=${WARMUP}
+iters=${ITERS}
+backends=${BACKENDS}
+comm_sizes=${COMM_SIZES}
+attention_sizes=${ATTENTION_SIZES}
+build=${BUILD}
+collect_env=${COLLECT_ENV}
+mpirun=${MPIRUN}
+hostfile=${HOSTFILE}
+mpirun_extra_args=${MPIRUN_EXTRA_ARGS}
+srun=${SRUN}
+srun_mpi_type=${SRUN_MPI_TYPE}
+srun_extra_args=${SRUN_EXTRA_ARGS}
+EOF
+}
 
-for np in ${NP_LIST}; do
+write_run_context() {
+  cat > "${RUN_DIR}/run_context.env" <<EOF
+RUN_LABEL="${RUN_LABEL}"
+RESULTS_ROOT="${RESULTS_ROOT}"
+RUN_DIR="${RUN_DIR}"
+CONFIG="${CONFIG}"
+NP_LIST="${NP_LIST}"
+RUN_TYPES="${RUN_TYPES}"
+EOF
+}
+
+write_launch_examples() {
+  local mpirun_prefix="${MPIRUN}"
+  local srun_prefix="${SRUN}"
+
+  if [ -n "${HOSTFILE}" ]; then
+    mpirun_prefix="${mpirun_prefix} --hostfile ${HOSTFILE}"
+  fi
+  if [ -n "${MPIRUN_EXTRA_ARGS}" ]; then
+    mpirun_prefix="${mpirun_prefix} ${MPIRUN_EXTRA_ARGS}"
+  fi
+  if [ -n "${SRUN_MPI_TYPE}" ]; then
+    srun_prefix="${srun_prefix} --mpi=${SRUN_MPI_TYPE}"
+  fi
+  if [ -n "${SRUN_EXTRA_ARGS}" ]; then
+    srun_prefix="${srun_prefix} ${SRUN_EXTRA_ARGS}"
+  fi
+
+  {
+    echo "# Ring Attention benchmark launch examples"
+    echo "# Preparation already created: ${RUN_DIR}"
+    echo "# The MPI/Slurm launcher is outside the benchmark scripts."
+    echo ""
+    echo "# OpenMPI / mpirun examples"
+    for np in ${NP_LIST}; do
+      for run_type in ${RUN_TYPES}; do
+        echo "${mpirun_prefix} -np ${np} env CONFIG=\"${CONFIG_PATH}\" NP=\"${np}\" RUN_TYPES=\"${run_type}\" RUN_LABEL=\"${RUN_LABEL}\" RESULTS_ROOT=\"${RESULTS_ROOT}\" \"${SCRIPT_DIR}/run_suite.sh\" > \"${RUN_DIR}/${run_type}_np${np}.log\" 2>&1"
+      done
+    done
+    echo ""
+    echo "# Slurm / srun examples"
+    for np in ${NP_LIST}; do
+      for run_type in ${RUN_TYPES}; do
+        echo "${srun_prefix} -n ${np} env CONFIG=\"${CONFIG_PATH}\" NP=\"${np}\" RUN_TYPES=\"${run_type}\" RUN_LABEL=\"${RUN_LABEL}\" RESULTS_ROOT=\"${RESULTS_ROOT}\" \"${SCRIPT_DIR}/run_suite.sh\" > \"${RUN_DIR}/${run_type}_np${np}.log\" 2>&1"
+      done
+    done
+  } > "${RUN_DIR}/launch_examples.txt"
+}
+
+prepare_suite() {
+  mkdir -p "${RUN_DIR}"
+  write_manifest
+  write_run_context
+  write_launch_examples
+
+  echo "Results directory: ${RUN_DIR}"
+
+  if [ "${BUILD}" = "1" ]; then
+    echo "Building benchmarks..."
+    make CONFIG="${CONFIG}" all 2>&1 | tee "${RUN_DIR}/build.log"
+  else
+    echo "Skipping build because BUILD=${BUILD}."
+  fi
+
+  if [ "${COLLECT_ENV}" = "1" ]; then
+    echo "Collecting local environment..."
+    ./collect_env.sh > "${RUN_DIR}/env_local.txt" 2>&1 || true
+  fi
+
+  echo "Preparation complete."
+  echo "Launch the MPI jobs externally. Example commands are in ${RUN_DIR}/launch_examples.txt"
+}
+
+run_worker() {
+  local detected_np=""
+  detected_np="$(detect_world_size 2>/dev/null || true)"
+
+  if [ -z "${detected_np}" ]; then
+    echo "ERROR: run_suite.sh worker mode requires mpirun/srun to launch the tasks externally." >&2
+    exit 1
+  fi
+
+  if is_primary_rank; then
+    echo "========== Ring Attention Suite =========="
+    echo "Date: $(date)"
+    echo "Hostname: $(hostname)"
+    echo "np=${detected_np} run_types=${RUN_TYPES}"
+    echo "results_dir=${RUN_DIR}"
+    echo ""
+  fi
+
   for run_type in ${RUN_TYPES}; do
     case "${run_type}" in
       comm)
-        log="${RUN_DIR}/comm_np${np}.log"
-        echo "Running comm benchmark with NP=${np}..."
-        NP="${np}" \
         WARMUP="${WARMUP}" \
         ITERS="${ITERS}" \
-        SIZES="${COMM_SIZES}" \
         BACKENDS="${BACKENDS}" \
-        LAUNCHER="${LAUNCHER_KIND}" \
-        MPIRUN="${MPIRUN}" \
-        SRUN="${SRUN:-}" \
-        HOSTFILE="${HOSTFILE}" \
-        MPIRUN_EXTRA_ARGS="${MPIRUN_EXTRA_ARGS}" \
-        SRUN_EXTRA_ARGS="${SRUN_EXTRA_ARGS}" \
-        ./benchmark_comm.sh > "${log}" 2>&1
+        SIZES="${COMM_SIZES}" \
+        NP="${detected_np}" \
+        CONFIG="${CONFIG}" \
+        ./benchmark_comm.sh
         ;;
       attention)
-        log="${RUN_DIR}/attention_np${np}.log"
-        echo "Running attention benchmark with NP=${np}..."
-        NP="${np}" \
         WARMUP="${WARMUP}" \
         ITERS="${ITERS}" \
-        SIZES="${ATTENTION_SIZES}" \
         BACKENDS="${BACKENDS}" \
-        LAUNCHER="${LAUNCHER_KIND}" \
-        MPIRUN="${MPIRUN}" \
-        SRUN="${SRUN:-}" \
-        HOSTFILE="${HOSTFILE}" \
-        MPIRUN_EXTRA_ARGS="${MPIRUN_EXTRA_ARGS}" \
-        SRUN_EXTRA_ARGS="${SRUN_EXTRA_ARGS}" \
-        ./benchmark_attention.sh > "${log}" 2>&1
+        SIZES="${ATTENTION_SIZES}" \
+        NP="${detected_np}" \
+        CONFIG="${CONFIG}" \
+        ./benchmark_attention.sh
         ;;
       *)
-        echo "Skipping unknown RUN_TYPES entry: ${run_type}"
+        echo "ERROR: unknown RUN_TYPES entry: ${run_type}" >&2
+        exit 1
         ;;
     esac
   done
-done
 
-echo "Done. Logs are in ${RUN_DIR}"
+  if is_primary_rank; then
+    echo "========== Suite Done =========="
+    echo "Finished at: $(date)"
+  fi
+}
+
+if [ "${PREPARE_ONLY}" = "1" ] || ! under_mpi_launcher; then
+  prepare_suite
+else
+  run_worker
+fi
