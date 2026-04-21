@@ -1,0 +1,19 @@
+.DS_Store
+
+# Local machine configuration
+benchmark.env
+
+# Build outputs
+bin/
+*.o
+*.out
+
+# Benchmark outputs
+results/
+env_info.txt
+results_comm.txt
+results_attention.txt
+ring_output_rank*.bin
+
+# Logs
+*.log
