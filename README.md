@@ -80,6 +80,41 @@ This matrix compares:
 
 Adjust `NP_LIST` to match the available GPUs. For example, use `NP_LIST="2 4"` on a 4-GPU node, or `NP_LIST="4 8"` on two 4-GPU nodes.
 
+## Slurm Clusters
+
+Inside a Slurm allocation, `run_suite.sh` now defaults to `srun` for benchmark launches and avoids the nested `srun -> mpirun` problem. Submit a batch script, then call `./run_suite.sh` directly from inside the batch job.
+
+Use `batch_slurm.example.sh` as a starting point:
+
+```bash
+sbatch batch_slurm.example.sh
+```
+
+Minimal pattern:
+
+```bash
+#!/bin/bash
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
+
+module load nvhpc/24.5
+module load cuda/12.4
+module load openmpi/4.1.7-nvhpc24.5
+module load slurm/17.11.5
+
+export LAUNCHER=srun
+export SRUN_MPI_TYPE=openmpi
+export NP_LIST="2"
+
+./run_suite.sh
+```
+
+Important:
+
+- Start `run_suite.sh` directly inside `sbatch`.
+- Do not use `srun ./run_suite.sh`.
+- Let `run_suite.sh` create the internal `srun -n <NP>` steps for each benchmark run.
+
 ## Running On Another Machine
 
 Send the repository link and ask the operator to run:
@@ -89,7 +124,7 @@ git clone https://github.com/YOUR_USERNAME/ring-attention-benchmark.git
 cd ring-attention-benchmark
 
 cp config.example.env benchmark.env
-# Edit benchmark.env if CUDA, MPI, NCCL, hostfile, or mpirun flags are machine-specific.
+# Edit benchmark.env if CUDA, MPI, NCCL, Slurm, hostfile, or launcher flags are machine-specific.
 
 make print-config
 make all
@@ -149,6 +184,7 @@ Environment variables for `run_suite.sh`:
 |----------|---------|-------------|
 | `CONFIG` | `benchmark.env` | Optional config file to source |
 | `RUN_LABEL` | `<hostname>_<timestamp>` | Result directory name |
+| `LAUNCHER` | `auto` | `auto`, `mpirun`, or `srun` |
 | `NP_LIST` | `2` | MPI process counts to sweep |
 | `RUN_TYPES` | `comm attention` | Which benchmark families to run |
 | `BUILD` | `1` | Run `make all` before benchmarking |
@@ -168,6 +204,9 @@ Environment variables for `benchmark_comm.sh` and `benchmark_attention.sh`:
 | `MPIRUN` | auto-detected | Path to mpirun |
 | `HOSTFILE` | unset | OpenMPI-style hostfile path |
 | `MPIRUN_EXTRA_ARGS` | unset | Extra mpirun flags, e.g. mapping/binding |
+| `SRUN` | auto-detected | Path to srun |
+| `SRUN_MPI_TYPE` | auto-detected | Slurm MPI plugin, e.g. `openmpi` |
+| `SRUN_EXTRA_ARGS` | unset | Extra srun flags, e.g. `--ntasks-per-node=1` |
 | `ALLOW_GPU_OVERSUBSCRIBE` | unset | Set to `1` only when multiple ranks may share one GPU |
 
 Default sizes:
@@ -190,6 +229,13 @@ NP=2 SIZES="1048576 4194304 16777216" ./benchmark_attention.sh
 NP_LIST="4 8" \
 HOSTFILE=hosts.txt \
 MPIRUN_EXTRA_ARGS="--map-by ppr:4:node --bind-to none" \
+./run_suite.sh
+
+# Slurm example: two nodes, one GPU task on each node
+LAUNCHER=srun \
+SRUN_MPI_TYPE=openmpi \
+SRUN_EXTRA_ARGS="--ntasks-per-node=1" \
+NP_LIST="2" \
 ./run_suite.sh
 
 # Run individual executable
@@ -258,6 +304,7 @@ ring_attention_benchmark/
 ├── Makefile
 ├── README.md
 ├── config.example.env
+├── batch_slurm.example.sh
 ├── run_suite.sh
 ├── benchmark_comm.sh
 ├── benchmark_attention.sh
@@ -285,6 +332,7 @@ ring_attention_benchmark/
 
 - Each MPI rank binds to GPU by local rank on its node. The code checks common MPI launcher variables first (`OMPI_COMM_WORLD_LOCAL_RANK`, `SLURM_LOCALID`, `MV2_COMM_WORLD_LOCAL_RANK`, etc.) and falls back to `MPI_Comm_split_type`.
 - By default the benchmark aborts if ranks per node exceed visible GPUs. Set `ALLOW_GPU_OVERSUBSCRIBE=1` only for deliberate oversubscription tests.
+- On Slurm clusters, launch the suite from `sbatch` with `./run_suite.sh`. The internal benchmark steps can then use `srun` safely.
 - Ensure no other jobs are running on the GPUs during benchmarks
 - For CUDA-aware MPI: requires MPI built with CUDA support
 - For best NCCL performance: use NVLink or InfiniBand interconnect

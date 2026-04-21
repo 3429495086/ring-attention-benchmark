@@ -17,3 +17,4 @@ ring_output_rank*.bin
 
 # Logs
 *.log
+slurm-*.out
