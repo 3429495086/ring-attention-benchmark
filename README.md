@@ -11,9 +11,9 @@ Ring Attention implementation with five communication backends for multi-GPU ben
 The package now follows an external-launch model:
 
 - `make` reads `benchmark.env` directly
-- `run_suite.sh` prepares the run directory and build artifacts
-- `mpirun` or `srun` is called outside the benchmark scripts
-- `benchmark_comm.sh` and `benchmark_attention.sh` only execute the benchmark inside the current MPI task
+- `run_suite.sh` only prepares the run directory and build artifacts
+- `benchmark_comm.sh` and `benchmark_attention.sh` launch the benchmark binaries directly with `mpirun` or `srun`
+- `launch_mpirun.example.sh` and `batch_slurm.example.sh` are ready-made outer launchers
 
 ## Benchmarks
 
@@ -115,23 +115,11 @@ This writes:
 - `run_context.env`
 - `launch_examples.txt`
 
-### Worker Step
+### Launch Step
 
-When `run_suite.sh` is started by `mpirun` or `srun`, it switches to worker mode automatically and runs the selected benchmark family inside the already-created MPI job.
-
-That means the correct pattern is:
-
-```bash
-mpirun -np 2 env NP=2 RUN_TYPES=comm ./run_suite.sh
-```
-
-or:
-
-```bash
-srun --mpi=openmpi -n 2 env NP=2 RUN_TYPES=comm ./run_suite.sh
-```
-
-The benchmark scripts themselves do not call `mpirun` or `srun`.
+`run_suite.sh` is preparation-only. The actual launch step should call
+`benchmark_comm.sh` or `benchmark_attention.sh` from a normal shell. Those
+wrappers call `mpirun` or `srun` directly on the benchmark binaries.
 
 ## Ready-Made Launcher Examples
 
@@ -147,8 +135,9 @@ It will:
 
 1. call `./run_suite.sh` once for preparation
 2. loop over `NP_LIST`
-3. launch `comm` and `attention` from the outside with `mpirun`
-4. write logs into the prepared results directory
+3. call `benchmark_comm.sh` / `benchmark_attention.sh`
+4. let those wrappers directly launch the benchmark binaries with `mpirun`
+5. write logs into the prepared results directory
 
 ### Slurm
 
@@ -162,7 +151,8 @@ The batch script now does the launching itself:
 
 1. prepare with `./run_suite.sh`
 2. loop over `NP_LIST`
-3. call `srun -n <NP> ... ./run_suite.sh`
+3. call `benchmark_comm.sh` / `benchmark_attention.sh`
+4. let those wrappers directly launch the benchmark binaries with `srun`
 
 This matches the cluster requirement that the launcher is outside the benchmark scripts.
 
@@ -175,22 +165,20 @@ This matches the cluster requirement that the launcher is outside the benchmark 
 RUN_LABEL="$(hostname)_20260421_test"
 RESULTS_ROOT="$PWD/results"
 
-mpirun -np 2 \
-  env CONFIG=benchmark.env NP=2 RUN_TYPES=comm RUN_LABEL="$RUN_LABEL" RESULTS_ROOT="$RESULTS_ROOT" \
-  ./run_suite.sh > "$RESULTS_ROOT/$RUN_LABEL/comm_np2.log" 2>&1
+env CONFIG=benchmark.env NP=2 RUN_LABEL="$RUN_LABEL" RESULTS_ROOT="$RESULTS_ROOT" \
+  LAUNCHER=mpirun ./benchmark_comm.sh > "$RESULTS_ROOT/$RUN_LABEL/comm_np2.log" 2>&1
 
-mpirun -np 2 \
-  env CONFIG=benchmark.env NP=2 RUN_TYPES=attention RUN_LABEL="$RUN_LABEL" RESULTS_ROOT="$RESULTS_ROOT" \
-  ./run_suite.sh > "$RESULTS_ROOT/$RUN_LABEL/attention_np2.log" 2>&1
+env CONFIG=benchmark.env NP=2 RUN_LABEL="$RUN_LABEL" RESULTS_ROOT="$RESULTS_ROOT" \
+  LAUNCHER=mpirun ./benchmark_attention.sh > "$RESULTS_ROOT/$RUN_LABEL/attention_np2.log" 2>&1
 ```
 
 ### Slurm
 
 ```bash
 ./run_suite.sh
-srun --mpi=openmpi --ntasks-per-node=1 -n 2 \
-  env CONFIG=benchmark.env NP=2 RUN_TYPES=comm RUN_LABEL="$RUN_LABEL" RESULTS_ROOT="$RESULTS_ROOT" \
-  ./run_suite.sh > "$RESULTS_ROOT/$RUN_LABEL/comm_np2.log" 2>&1
+env CONFIG=benchmark.env NP=2 RUN_LABEL="$RUN_LABEL" RESULTS_ROOT="$RESULTS_ROOT" \
+  LAUNCHER=srun SRUN_MPI_TYPE=openmpi SRUN_EXTRA_ARGS="--ntasks-per-node=1" \
+  ./benchmark_comm.sh > "$RESULTS_ROOT/$RUN_LABEL/comm_np2.log" 2>&1
 ```
 
 ### Direct wrapper launch
@@ -198,8 +186,8 @@ srun --mpi=openmpi --ntasks-per-node=1 -n 2 \
 You can also launch the benchmark family wrappers directly:
 
 ```bash
-mpirun -np 2 env NP=2 ./benchmark_comm.sh
-mpirun -np 2 env NP=2 ./benchmark_attention.sh
+env NP=2 LAUNCHER=mpirun ./benchmark_comm.sh
+env NP=2 LAUNCHER=mpirun ./benchmark_attention.sh
 ```
 
 ## Main Variables
@@ -228,7 +216,7 @@ mpirun -np 2 env NP=2 ./benchmark_attention.sh
 
 ### External Launcher Hints
 
-These variables are not used to launch jobs internally. They are only used by `launch_examples.txt`, `launch_mpirun.example.sh`, and `batch_slurm.example.sh`.
+These variables are used by the wrapper scripts that launch the binaries directly.
 
 | Variable | Meaning |
 |----------|---------|

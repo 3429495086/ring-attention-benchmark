@@ -135,6 +135,47 @@ void merge_online_softmax(
     m_run[i] = m_max;
 }
 
+static bool event_ready(cudaEvent_t event, int rank) {
+    cudaError_t err = cudaEventQuery(event);
+    if (err == cudaSuccess) {
+        return true;
+    }
+    if (err == cudaErrorNotReady) {
+        return false;
+    }
+    fprintf(stderr, "[Rank %d] CUDA event query failed: %s\n",
+            rank, cudaGetErrorString(err));
+    MPI_Abort(MPI_COMM_WORLD, 1);
+    return false;
+}
+
+static void launch_attention_and_merge(
+    int rank,
+    cudaStream_t compute_stream,
+    const float *d_Q, const float *kv,
+    int seq_q, int seq_k, int dim,
+    float *d_acc_local, float *d_m_local, float *d_l_local,
+    float *m_run, float *l_run, float *acc_run,
+    cudaEvent_t attn_start, cudaEvent_t attn_end, cudaEvent_t merge_end
+) {
+    CHECK_CUDA(cudaEventRecord(attn_start, compute_stream));
+    gpu_attention_partial_kernel<<<seq_q, 256, 0, compute_stream>>>(
+        d_Q, kv, kv,
+        seq_q, seq_k, dim,
+        d_acc_local, d_m_local, d_l_local
+    );
+    CHECK_CUDA(cudaGetLastError());
+    CHECK_CUDA(cudaEventRecord(attn_end, compute_stream));
+
+    merge_online_softmax<<<(seq_q + 255) / 256, 256, 0, compute_stream>>>(
+        m_run, l_run, acc_run,
+        d_m_local, d_l_local, d_acc_local,
+        seq_q, dim
+    );
+    CHECK_CUDA(cudaGetLastError());
+    CHECK_CUDA(cudaEventRecord(merge_end, compute_stream));
+}
+
 int main(int argc, char **argv){
     MPI_Init(&argc, &argv);
 
@@ -213,9 +254,6 @@ int main(int argc, char **argv){
     CHECK_CUDA(cudaMemcpy(m_run, h_m_init, seq_q * sizeof(float),
                           cudaMemcpyHostToDevice));
 
-    float *h_send, *h_recv;
-    CHECK_CUDA(cudaMallocHost(&h_send, kv_size));
-    CHECK_CUDA(cudaMallocHost(&h_recv, kv_size));
     /*
      * current_kv: the shard to SEND this step
      *             (starts as our own KV)
@@ -242,6 +280,14 @@ int main(int argc, char **argv){
     float *h_acc = (float *)malloc(seq_q * dim * sizeof(float));
     float *h_l = (float *)malloc(seq_q * sizeof(float));
 
+    cudaStream_t compute_stream;
+    CHECK_CUDA(cudaStreamCreate(&compute_stream));
+
+    cudaEvent_t attn_start_event, attn_end_event, merge_end_event;
+    CHECK_CUDA(cudaEventCreate(&attn_start_event));
+    CHECK_CUDA(cudaEventCreate(&attn_end_event));
+    CHECK_CUDA(cudaEventCreate(&merge_end_event));
+
     double sum_total = 0.0;
     double sum_mpi = 0.0;
     double sum_attn = 0.0;
@@ -266,68 +312,60 @@ int main(int argc, char **argv){
         MPI_Barrier(MPI_COMM_WORLD);
         double t_total_start = MPI_Wtime();
 
-        // step 0: attention on own KV
-        double ta = MPI_Wtime();
-        gpu_attention_partial_kernel<<<seq_q, 256>>>(
-            d_Q, d_buf_1, d_buf_1,
-            seq_q, seq_k, dim,
-            d_acc_local, d_m_local, d_l_local
-        );
-        CHECK_CUDA(cudaGetLastError());
-        CHECK_CUDA(cudaDeviceSynchronize());
-        double tb = MPI_Wtime();
-        local_attn += (tb - ta) * 1000.0;
-
-        ta = MPI_Wtime();
-        merge_online_softmax<<<(seq_q + 255) / 256, 256>>>(
-            m_run, l_run, acc_run, 
-            d_m_local, d_l_local, d_acc_local,
-            seq_q, dim
-        );
-        CHECK_CUDA(cudaGetLastError());
-        CHECK_CUDA(cudaDeviceSynchronize());
-        tb = MPI_Wtime();
-        local_merge += (tb - ta) * 1000.0;
-
-        // RING LOOP: size - 1 steps
         for(int step = 0; step < size - 1; step++){
-            double t1 = MPI_Wtime();
-
-            // MPI: send right, receive left
-             MPI_Request reqs[2];
+            double t_mpi_start = MPI_Wtime();
+            MPI_Request reqs[2];
             MPI_Irecv(next_kv, n_floats, MPI_FLOAT, left, step,
                       MPI_COMM_WORLD, &reqs[0]);
             MPI_Isend(current_kv, n_floats, MPI_FLOAT, right, step,
                       MPI_COMM_WORLD, &reqs[1]);
-            MPI_Waitall(2, reqs, MPI_STATUSES_IGNORE);
-            double t2 = MPI_Wtime();
 
-            gpu_attention_partial_kernel<<<seq_q, 256>>>(
-                d_Q, next_kv, next_kv,
+            launch_attention_and_merge(
+                rank, compute_stream,
+                d_Q, current_kv,
                 seq_q, seq_k, dim,
-                d_acc_local, d_m_local, d_l_local
+                d_acc_local, d_m_local, d_l_local,
+                m_run, l_run, acc_run,
+                attn_start_event, attn_end_event, merge_end_event
             );
-            CHECK_CUDA(cudaGetLastError());
-            CHECK_CUDA(cudaDeviceSynchronize());
-            double t3 = MPI_Wtime();
 
-            merge_online_softmax<<<(seq_q + 255) / 256, 256>>>(
-                m_run, l_run, acc_run, 
-                d_m_local, d_l_local, d_acc_local,
-                seq_q, dim
-            );
-            CHECK_CUDA(cudaGetLastError());
-            CHECK_CUDA(cudaDeviceSynchronize());
-            double t4 = MPI_Wtime();
+            int mpi_done = 0;
+            while(!mpi_done || !event_ready(merge_end_event, rank)) {
+                if(!mpi_done) {
+                    MPI_Testall(2, reqs, &mpi_done, MPI_STATUSES_IGNORE);
+                }
+            }
+            double t_mpi_end = MPI_Wtime();
 
-            local_mpi += (t2 - t1) * 1000.0;
-            local_attn += (t3 - t2) * 1000.0;
-            local_merge += (t4 - t3) * 1000.0;
+            float attn_ms = 0.0f;
+            float merge_ms = 0.0f;
+            CHECK_CUDA(cudaEventElapsedTime(&attn_ms, attn_start_event, attn_end_event));
+            CHECK_CUDA(cudaEventElapsedTime(&merge_ms, attn_end_event, merge_end_event));
+
+            local_mpi += (t_mpi_end - t_mpi_start) * 1000.0;
+            local_attn += attn_ms;
+            local_merge += merge_ms;
 
             float *tmp = current_kv;
             current_kv = next_kv;
             next_kv    = tmp;
         }
+
+        launch_attention_and_merge(
+            rank, compute_stream,
+            d_Q, current_kv,
+            seq_q, seq_k, dim,
+            d_acc_local, d_m_local, d_l_local,
+            m_run, l_run, acc_run,
+            attn_start_event, attn_end_event, merge_end_event
+        );
+        CHECK_CUDA(cudaEventSynchronize(merge_end_event));
+        float attn_ms = 0.0f;
+        float merge_ms = 0.0f;
+        CHECK_CUDA(cudaEventElapsedTime(&attn_ms, attn_start_event, attn_end_event));
+        CHECK_CUDA(cudaEventElapsedTime(&merge_ms, attn_end_event, merge_end_event));
+        local_attn += attn_ms;
+        local_merge += merge_ms;
 
         double tf1 = MPI_Wtime();
         CHECK_CUDA(cudaMemcpy(h_acc, acc_run, seq_q * dim * sizeof(float),
@@ -387,12 +425,14 @@ int main(int argc, char **argv){
     CHECK_CUDA(cudaFree(acc_run));
     CHECK_CUDA(cudaFree(d_buf_1));
     CHECK_CUDA(cudaFree(d_buf_2));
-    CHECK_CUDA(cudaFreeHost(h_send));
-    CHECK_CUDA(cudaFreeHost(h_recv));
     CHECK_CUDA(cudaFree(d_Q));
     CHECK_CUDA(cudaFree(d_m_local));
     CHECK_CUDA(cudaFree(d_l_local));
     CHECK_CUDA(cudaFree(d_acc_local));
+    CHECK_CUDA(cudaEventDestroy(attn_start_event));
+    CHECK_CUDA(cudaEventDestroy(attn_end_event));
+    CHECK_CUDA(cudaEventDestroy(merge_end_event));
+    CHECK_CUDA(cudaStreamDestroy(compute_stream));
 
 
     MPI_Finalize();

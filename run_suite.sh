@@ -1,6 +1,5 @@
 #!/bin/bash
-# Preparation mode: build, collect env, and generate launch examples.
-# Worker mode: when started by mpirun/srun, run the selected benchmark family directly.
+# Preparation-only mode: build, collect env, and generate launch examples.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,6 +13,7 @@ source_config_preserving_env "${CONFIG}" \
   CONFIG RUN_LABEL RESULTS_ROOT NP_LIST RUN_TYPES WARMUP ITERS BACKENDS \
   COMM_SIZES ATTENTION_SIZES BUILD COLLECT_ENV HOSTFILE MPIRUN MPIRUN_EXTRA_ARGS \
   SRUN SRUN_MPI_TYPE SRUN_EXTRA_ARGS PREPARE_ONLY
+configure_runtime_env
 
 RUN_LABEL=${RUN_LABEL:-"$(hostname)_$(date +%Y%m%d_%H%M%S)"}
 RESULTS_ROOT=${RESULTS_ROOT:-"${SCRIPT_DIR}/results"}
@@ -81,38 +81,55 @@ EOF
 }
 
 write_launch_examples() {
-  local mpirun_prefix="${MPIRUN}"
-  local srun_prefix="${SRUN}"
+  local mpirun_prefix=""
+  local srun_prefix=""
 
+  mpirun_prefix="env CONFIG=\"${CONFIG_PATH}\" RUN_LABEL=\"${RUN_LABEL}\" RESULTS_ROOT=\"${RESULTS_ROOT}\" LAUNCHER=\"mpirun\" MPIRUN=\"${MPIRUN}\""
   if [ -n "${HOSTFILE}" ]; then
-    mpirun_prefix="${mpirun_prefix} --hostfile ${HOSTFILE}"
+    mpirun_prefix="${mpirun_prefix} HOSTFILE=\"${HOSTFILE}\""
   fi
   if [ -n "${MPIRUN_EXTRA_ARGS}" ]; then
-    mpirun_prefix="${mpirun_prefix} ${MPIRUN_EXTRA_ARGS}"
+    mpirun_prefix="${mpirun_prefix} MPIRUN_EXTRA_ARGS=\"${MPIRUN_EXTRA_ARGS}\""
   fi
+
+  srun_prefix="env CONFIG=\"${CONFIG_PATH}\" RUN_LABEL=\"${RUN_LABEL}\" RESULTS_ROOT=\"${RESULTS_ROOT}\" LAUNCHER=\"srun\" SRUN=\"${SRUN}\""
   if [ -n "${SRUN_MPI_TYPE}" ]; then
-    srun_prefix="${srun_prefix} --mpi=${SRUN_MPI_TYPE}"
+    srun_prefix="${srun_prefix} SRUN_MPI_TYPE=\"${SRUN_MPI_TYPE}\""
   fi
   if [ -n "${SRUN_EXTRA_ARGS}" ]; then
-    srun_prefix="${srun_prefix} ${SRUN_EXTRA_ARGS}"
+    srun_prefix="${srun_prefix} SRUN_EXTRA_ARGS=\"${SRUN_EXTRA_ARGS}\""
   fi
 
   {
     echo "# Ring Attention benchmark launch examples"
     echo "# Preparation already created: ${RUN_DIR}"
-    echo "# The MPI/Slurm launcher is outside the benchmark scripts."
+    echo "# The launcher should call the benchmark wrappers directly."
     echo ""
     echo "# OpenMPI / mpirun examples"
     for np in ${NP_LIST}; do
       for run_type in ${RUN_TYPES}; do
-        echo "${mpirun_prefix} -np ${np} env CONFIG=\"${CONFIG_PATH}\" NP=\"${np}\" RUN_TYPES=\"${run_type}\" RUN_LABEL=\"${RUN_LABEL}\" RESULTS_ROOT=\"${RESULTS_ROOT}\" \"${SCRIPT_DIR}/run_suite.sh\" > \"${RUN_DIR}/${run_type}_np${np}.log\" 2>&1"
+        case "${run_type}" in
+          comm)
+            echo "${mpirun_prefix} NP=\"${np}\" \"${SCRIPT_DIR}/benchmark_comm.sh\" > \"${RUN_DIR}/${run_type}_np${np}.log\" 2>&1"
+            ;;
+          attention)
+            echo "${mpirun_prefix} NP=\"${np}\" \"${SCRIPT_DIR}/benchmark_attention.sh\" > \"${RUN_DIR}/${run_type}_np${np}.log\" 2>&1"
+            ;;
+        esac
       done
     done
     echo ""
     echo "# Slurm / srun examples"
     for np in ${NP_LIST}; do
       for run_type in ${RUN_TYPES}; do
-        echo "${srun_prefix} -n ${np} env CONFIG=\"${CONFIG_PATH}\" NP=\"${np}\" RUN_TYPES=\"${run_type}\" RUN_LABEL=\"${RUN_LABEL}\" RESULTS_ROOT=\"${RESULTS_ROOT}\" \"${SCRIPT_DIR}/run_suite.sh\" > \"${RUN_DIR}/${run_type}_np${np}.log\" 2>&1"
+        case "${run_type}" in
+          comm)
+            echo "${srun_prefix} NP=\"${np}\" \"${SCRIPT_DIR}/benchmark_comm.sh\" > \"${RUN_DIR}/${run_type}_np${np}.log\" 2>&1"
+            ;;
+          attention)
+            echo "${srun_prefix} NP=\"${np}\" \"${SCRIPT_DIR}/benchmark_attention.sh\" > \"${RUN_DIR}/${run_type}_np${np}.log\" 2>&1"
+            ;;
+        esac
       done
     done
   } > "${RUN_DIR}/launch_examples.txt"
@@ -142,59 +159,10 @@ prepare_suite() {
   echo "Launch the MPI jobs externally. Example commands are in ${RUN_DIR}/launch_examples.txt"
 }
 
-run_worker() {
-  local detected_np=""
-  detected_np="$(detect_world_size 2>/dev/null || true)"
-
-  if [ -z "${detected_np}" ]; then
-    echo "ERROR: run_suite.sh worker mode requires mpirun/srun to launch the tasks externally." >&2
-    exit 1
-  fi
-
-  if is_primary_rank; then
-    echo "========== Ring Attention Suite =========="
-    echo "Date: $(date)"
-    echo "Hostname: $(hostname)"
-    echo "np=${detected_np} run_types=${RUN_TYPES}"
-    echo "results_dir=${RUN_DIR}"
-    echo ""
-  fi
-
-  for run_type in ${RUN_TYPES}; do
-    case "${run_type}" in
-      comm)
-        WARMUP="${WARMUP}" \
-        ITERS="${ITERS}" \
-        BACKENDS="${BACKENDS}" \
-        SIZES="${COMM_SIZES}" \
-        NP="${detected_np}" \
-        CONFIG="${CONFIG}" \
-        ./benchmark_comm.sh
-        ;;
-      attention)
-        WARMUP="${WARMUP}" \
-        ITERS="${ITERS}" \
-        BACKENDS="${BACKENDS}" \
-        SIZES="${ATTENTION_SIZES}" \
-        NP="${detected_np}" \
-        CONFIG="${CONFIG}" \
-        ./benchmark_attention.sh
-        ;;
-      *)
-        echo "ERROR: unknown RUN_TYPES entry: ${run_type}" >&2
-        exit 1
-        ;;
-    esac
-  done
-
-  if is_primary_rank; then
-    echo "========== Suite Done =========="
-    echo "Finished at: $(date)"
-  fi
-}
-
-if [ "${PREPARE_ONLY}" = "1" ] || ! under_mpi_launcher; then
-  prepare_suite
-else
-  run_worker
+if under_mpi_launcher; then
+  echo "ERROR: run_suite.sh is preparation-only." >&2
+  echo "Use benchmark_comm.sh / benchmark_attention.sh from a normal shell, or the example launcher scripts." >&2
+  exit 1
 fi
+
+prepare_suite

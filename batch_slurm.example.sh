@@ -35,6 +35,7 @@ source "${SCRIPT_DIR}/scripts/mpi_env.sh"
 source_config_preserving_env "${CONFIG}" \
   CONFIG RUN_LABEL RESULTS_ROOT NP_LIST RUN_TYPES WARMUP ITERS BACKENDS \
   COMM_SIZES ATTENTION_SIZES BUILD COLLECT_ENV SRUN SRUN_MPI_TYPE SRUN_EXTRA_ARGS
+configure_runtime_env
 
 RUN_LABEL=${RUN_LABEL:-"$(hostname)_$(date +%Y%m%d_%H%M%S)"}
 RESULTS_ROOT=${RESULTS_ROOT:-"${SCRIPT_DIR}/results"}
@@ -44,15 +45,6 @@ RUN_TYPES=${RUN_TYPES:-"comm attention"}
 SRUN=${SRUN:-srun}
 SRUN_MPI_TYPE=${SRUN_MPI_TYPE:-openmpi}
 SRUN_EXTRA_ARGS=${SRUN_EXTRA_ARGS:-"--ntasks-per-node=1"}
-
-srun_args=()
-if [ -n "${SRUN_MPI_TYPE}" ]; then
-  srun_args+=(--mpi="${SRUN_MPI_TYPE}")
-fi
-if [ -n "${SRUN_EXTRA_ARGS}" ]; then
-  read -r -a extra_args <<< "${SRUN_EXTRA_ARGS}"
-  srun_args+=("${extra_args[@]}")
-fi
 
 # Optional: override detected tools if the cluster modules do not expose them in PATH.
 # export NVCC=/share/toolkit/cuda/12.4.1/bin/nvcc
@@ -66,15 +58,22 @@ for np in ${NP_LIST}; do
   for run_type in ${RUN_TYPES}; do
     log="${RUN_DIR}/${run_type}_np${np}.log"
     echo "Running ${run_type} benchmark with NP=${np}..."
-    if [ "${#srun_args[@]}" -gt 0 ]; then
-      "${SRUN}" "${srun_args[@]}" -n "${np}" \
-        env CONFIG="${CONFIG}" NP="${np}" RUN_TYPES="${run_type}" RUN_LABEL="${RUN_LABEL}" RESULTS_ROOT="${RESULTS_ROOT}" \
-        ./run_suite.sh > "${log}" 2>&1
-    else
-      "${SRUN}" -n "${np}" \
-        env CONFIG="${CONFIG}" NP="${np}" RUN_TYPES="${run_type}" RUN_LABEL="${RUN_LABEL}" RESULTS_ROOT="${RESULTS_ROOT}" \
-        ./run_suite.sh > "${log}" 2>&1
-    fi
+    case "${run_type}" in
+      comm)
+        env CONFIG="${CONFIG}" NP="${np}" RUN_LABEL="${RUN_LABEL}" RESULTS_ROOT="${RESULTS_ROOT}" \
+          LAUNCHER="srun" SRUN="${SRUN}" SRUN_MPI_TYPE="${SRUN_MPI_TYPE}" SRUN_EXTRA_ARGS="${SRUN_EXTRA_ARGS}" \
+          ./benchmark_comm.sh > "${log}" 2>&1
+        ;;
+      attention)
+        env CONFIG="${CONFIG}" NP="${np}" RUN_LABEL="${RUN_LABEL}" RESULTS_ROOT="${RESULTS_ROOT}" \
+          LAUNCHER="srun" SRUN="${SRUN}" SRUN_MPI_TYPE="${SRUN_MPI_TYPE}" SRUN_EXTRA_ARGS="${SRUN_EXTRA_ARGS}" \
+          ./benchmark_attention.sh > "${log}" 2>&1
+        ;;
+      *)
+        echo "ERROR: unknown RUN_TYPES entry: ${run_type}" >&2
+        exit 1
+        ;;
+    esac
   done
 done
 
