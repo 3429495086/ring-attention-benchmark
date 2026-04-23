@@ -1,5 +1,5 @@
 # Ring Attention Benchmark - Makefile
-# Supports: staged MPI, staged MPI Isend/Irecv, CUDA-aware MPI, CUDA-aware MPI Isend/Irecv, NCCL
+# Supports: 5 communication backends plus overlap attention benchmarks
 
 CONFIG ?= benchmark.env
 -include $(CONFIG)
@@ -13,7 +13,7 @@ NCCL_HOME    ?=
 NVCC         ?= $(if $(CUDA_HOME),$(CUDA_HOME)/bin/nvcc,nvcc)
 MPICXX       ?= mpicxx
 NVCCFLAGS    ?= -O3
-NORMALIZE_NVCC_LINK_FLAGS := ./scripts/normalize_nvcc_link_flags.sh
+NORMALIZE_NVCC_LINK_FLAGS := /bin/sh ./scripts/normalize_nvcc_link_flags.sh
 
 strip-trailing-slash = $(patsubst %/,%,$(1))
 
@@ -57,8 +57,10 @@ COMM_EXES := \
 ATTENTION_EXES := \
 	$(BIN_DIR)/ring_attention_staged_gpu_bench \
 	$(BIN_DIR)/ring_attention_staged_Isendrecv_gpu_bench \
+	$(BIN_DIR)/ring_attention_staged_Isendrecv_overlap_gpu_bench \
 	$(BIN_DIR)/ring_attention_cuda_aware_gpu_bench \
 	$(BIN_DIR)/ring_attention_cuda_aware_Isendrecv_gpu_bench \
+	$(BIN_DIR)/ring_attention_cuda_aware_Isendrecv_overlap_gpu_bench \
 	$(BIN_DIR)/ring_attention_nccl_gpu_bench
 
 .PHONY: all comm attention clean help print-config
@@ -74,6 +76,8 @@ attention: $(BIN_DIR) $(ATTENTION_EXES)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
+
+$(COMM_EXES) $(ATTENTION_EXES): | $(BIN_DIR)
 
 print-config:
 	@echo "CONFIG=$(CONFIG)"
@@ -110,10 +114,16 @@ $(BIN_DIR)/ring_attention_staged_gpu_bench: $(SRC_ATTN)/ring_attention_staged_gp
 $(BIN_DIR)/ring_attention_staged_Isendrecv_gpu_bench: $(SRC_ATTN)/ring_attention_staged_Isendrecv_gpu_bench.cu $(COMMON_HEADERS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $< $(MPI_INC) $(MPI_LIB)
 
+$(BIN_DIR)/ring_attention_staged_Isendrecv_overlap_gpu_bench: $(SRC_ATTN)/ring_attention_staged_Isendrecv_overlap_gpu_bench.cu $(COMMON_HEADERS)
+	$(NVCC) $(NVCCFLAGS) -o $@ $< $(MPI_INC) $(MPI_LIB)
+
 $(BIN_DIR)/ring_attention_cuda_aware_gpu_bench: $(SRC_ATTN)/ring_attention_cuda_aware_gpu_bench.cu $(COMMON_HEADERS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $< $(MPI_INC) $(MPI_LIB)
 
 $(BIN_DIR)/ring_attention_cuda_aware_Isendrecv_gpu_bench: $(SRC_ATTN)/ring_attention_cuda_aware_Isendrecv_gpu_bench.cu $(COMMON_HEADERS)
+	$(NVCC) $(NVCCFLAGS) -o $@ $< $(MPI_INC) $(MPI_LIB)
+
+$(BIN_DIR)/ring_attention_cuda_aware_Isendrecv_overlap_gpu_bench: $(SRC_ATTN)/ring_attention_cuda_aware_Isendrecv_overlap_gpu_bench.cu $(COMMON_HEADERS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $< $(MPI_INC) $(MPI_LIB)
 
 $(BIN_DIR)/ring_attention_nccl_gpu_bench: $(SRC_ATTN)/ring_attention_nccl_gpu_bench.cu $(COMMON_HEADERS)

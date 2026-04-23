@@ -10,7 +10,7 @@ source "${SCRIPT_DIR}/scripts/mpi_env.sh"
 
 CONFIG=${CONFIG:-benchmark.env}
 source_config_preserving_env "${CONFIG}" \
-  CONFIG RUN_LABEL RESULTS_ROOT NP_LIST RUN_TYPES WARMUP ITERS BACKENDS \
+  CONFIG RUN_LABEL RESULTS_ROOT NP_LIST RUN_TYPES WARMUP ITERS BACKENDS ATTENTION_BACKENDS \
   COMM_SIZES ATTENTION_SIZES BUILD COLLECT_ENV HOSTFILE MPIRUN MPIRUN_EXTRA_ARGS \
   SRUN SRUN_MPI_TYPE SRUN_EXTRA_ARGS PREPARE_ONLY
 configure_runtime_env
@@ -23,8 +23,9 @@ RUN_TYPES=${RUN_TYPES:-"comm attention"}
 WARMUP=${WARMUP:-10}
 ITERS=${ITERS:-100}
 BACKENDS=${BACKENDS:-"staged staged_Isendrecv cuda_aware cuda_aware_Isendrecv nccl"}
+ATTENTION_BACKENDS=${ATTENTION_BACKENDS:-"staged staged_Isendrecv staged_Isendrecv_overlap cuda_aware cuda_aware_Isendrecv cuda_aware_Isendrecv_overlap nccl"}
 COMM_SIZES=${COMM_SIZES:-"262144 524288 1048576 4194304 16777216"}
-ATTENTION_SIZES=${ATTENTION_SIZES:-"262144 524288 1048576 4194304"}
+ATTENTION_SIZES=${ATTENTION_SIZES:-"262144 524288 1048576"}
 BUILD=${BUILD:-1}
 COLLECT_ENV=${COLLECT_ENV:-1}
 HOSTFILE=${HOSTFILE:-}
@@ -56,6 +57,7 @@ run_types=${RUN_TYPES}
 warmup=${WARMUP}
 iters=${ITERS}
 backends=${BACKENDS}
+attention_backends=${ATTENTION_BACKENDS}
 comm_sizes=${COMM_SIZES}
 attention_sizes=${ATTENTION_SIZES}
 build=${BUILD}
@@ -77,6 +79,8 @@ RUN_DIR="${RUN_DIR}"
 CONFIG="${CONFIG}"
 NP_LIST="${NP_LIST}"
 RUN_TYPES="${RUN_TYPES}"
+BACKENDS="${BACKENDS}"
+ATTENTION_BACKENDS="${ATTENTION_BACKENDS}"
 EOF
 }
 
@@ -135,6 +139,68 @@ write_launch_examples() {
   } > "${RUN_DIR}/launch_examples.txt"
 }
 
+build_target_for_backend() {
+  local run_type="$1"
+  local backend="$2"
+
+  case "${run_type}:${backend}" in
+    comm:staged) printf '%s\n' "bin/ring_loop_staged" ;;
+    comm:staged_Isendrecv) printf '%s\n' "bin/ring_loop_staged_Isendrecv" ;;
+    comm:cuda_aware) printf '%s\n' "bin/ring_loop_cuda_aware" ;;
+    comm:cuda_aware_Isendrecv) printf '%s\n' "bin/ring_loop_cuda_aware_Isendrecv" ;;
+    comm:nccl) printf '%s\n' "bin/ring_loop_nccl" ;;
+    attention:staged) printf '%s\n' "bin/ring_attention_staged_gpu_bench" ;;
+    attention:staged_Isendrecv) printf '%s\n' "bin/ring_attention_staged_Isendrecv_gpu_bench" ;;
+    attention:staged_Isendrecv_overlap) printf '%s\n' "bin/ring_attention_staged_Isendrecv_overlap_gpu_bench" ;;
+    attention:cuda_aware) printf '%s\n' "bin/ring_attention_cuda_aware_gpu_bench" ;;
+    attention:cuda_aware_Isendrecv) printf '%s\n' "bin/ring_attention_cuda_aware_Isendrecv_gpu_bench" ;;
+    attention:cuda_aware_Isendrecv_overlap) printf '%s\n' "bin/ring_attention_cuda_aware_Isendrecv_overlap_gpu_bench" ;;
+    attention:nccl) printf '%s\n' "bin/ring_attention_nccl_gpu_bench" ;;
+    *) return 1 ;;
+  esac
+}
+
+build_requested_targets() {
+  local -a targets=()
+  local run_type=""
+  local backend=""
+  local target=""
+
+  for run_type in ${RUN_TYPES}; do
+    case "${run_type}" in
+      comm)
+        for backend in ${BACKENDS}; do
+          if target="$(build_target_for_backend "${run_type}" "${backend}")"; then
+            targets+=("${target}")
+          else
+            echo "WARN: skipping unknown comm backend during build: ${backend}"
+          fi
+        done
+        ;;
+      attention)
+        for backend in ${ATTENTION_BACKENDS}; do
+          if target="$(build_target_for_backend "${run_type}" "${backend}")"; then
+            targets+=("${target}")
+          else
+            echo "WARN: skipping unknown attention backend during build: ${backend}"
+          fi
+        done
+        ;;
+      *)
+        echo "WARN: skipping unknown RUN_TYPES entry during build: ${run_type}"
+        ;;
+    esac
+  done
+
+  if [ "${#targets[@]}" -eq 0 ]; then
+    echo "No build targets selected from RUN_TYPES/BACKENDS."
+    return 0
+  fi
+
+  mapfile -t targets < <(printf '%s\n' "${targets[@]}" | awk '!seen[$0]++')
+  make CONFIG="${CONFIG}" "${targets[@]}"
+}
+
 prepare_suite() {
   mkdir -p "${RUN_DIR}"
   write_manifest
@@ -145,7 +211,7 @@ prepare_suite() {
 
   if [ "${BUILD}" = "1" ]; then
     echo "Building benchmarks..."
-    make CONFIG="${CONFIG}" all 2>&1 | tee "${RUN_DIR}/build.log"
+    build_requested_targets 2>&1 | tee "${RUN_DIR}/build.log"
   else
     echo "Skipping build because BUILD=${BUILD}."
   fi

@@ -9,7 +9,7 @@ cd "${SCRIPT_DIR}"
 source "${SCRIPT_DIR}/scripts/mpi_env.sh"
 
 CONFIG=${CONFIG:-benchmark.env}
-source_config_preserving_env "${CONFIG}" CONFIG NP WARMUP ITERS SIZES BACKENDS \
+source_config_preserving_env "${CONFIG}" CONFIG NP WARMUP ITERS SIZES BACKENDS ATTENTION_BACKENDS \
   LAUNCHER MPIRUN HOSTFILE MPIRUN_EXTRA_ARGS SRUN SRUN_MPI_TYPE SRUN_EXTRA_ARGS
 configure_runtime_env
 
@@ -21,8 +21,8 @@ fi
 NP=${NP:-2}
 WARMUP=${WARMUP:-10}
 ITERS=${ITERS:-100}
-SIZES=${SIZES:-"262144 524288 1048576 4194304"}
-BACKENDS=${BACKENDS:-"staged staged_Isendrecv cuda_aware cuda_aware_Isendrecv nccl"}
+SIZES=${SIZES:-"262144 524288 1048576"}
+ATTENTION_BACKENDS=${ATTENTION_BACKENDS:-"staged staged_Isendrecv staged_Isendrecv_overlap cuda_aware cuda_aware_Isendrecv cuda_aware_Isendrecv_overlap nccl"}
 LAUNCHER=${LAUNCHER:-mpirun}
 MPIRUN=${MPIRUN:-mpirun}
 HOSTFILE=${HOSTFILE:-}
@@ -55,8 +55,10 @@ backend_exe() {
   case "$1" in
     staged) printf '%s\n' "${BIN_DIR}/ring_attention_staged_gpu_bench" ;;
     staged_Isendrecv) printf '%s\n' "${BIN_DIR}/ring_attention_staged_Isendrecv_gpu_bench" ;;
+    staged_Isendrecv_overlap) printf '%s\n' "${BIN_DIR}/ring_attention_staged_Isendrecv_overlap_gpu_bench" ;;
     cuda_aware) printf '%s\n' "${BIN_DIR}/ring_attention_cuda_aware_gpu_bench" ;;
     cuda_aware_Isendrecv) printf '%s\n' "${BIN_DIR}/ring_attention_cuda_aware_Isendrecv_gpu_bench" ;;
+    cuda_aware_Isendrecv_overlap) printf '%s\n' "${BIN_DIR}/ring_attention_cuda_aware_Isendrecv_overlap_gpu_bench" ;;
     nccl) printf '%s\n' "${BIN_DIR}/ring_attention_nccl_gpu_bench" ;;
     *) return 1 ;;
   esac
@@ -101,10 +103,10 @@ echo "Hostname: $(hostname)"
 echo "launcher=${LAUNCHER} np=${NP} warmup=${WARMUP} iters=${ITERS}"
 echo "mpirun=${MPIRUN}"
 echo "sizes=${SIZES}"
-echo "backends=${BACKENDS}"
+echo "backends=${ATTENTION_BACKENDS}"
 echo ""
 
-for backend in ${BACKENDS}; do
+for backend in ${ATTENTION_BACKENDS}; do
   if ! exe="$(backend_exe "${backend}")"; then
     echo "SKIP backend=${backend} (unknown backend)"
     echo ""

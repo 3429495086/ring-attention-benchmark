@@ -1,11 +1,13 @@
 # Ring Attention Multi-GPU Benchmark
 
-Ring Attention implementation with five communication backends for multi-GPU benchmarking:
+Ring Attention implementation with five communication backends and two overlap-enabled attention variants:
 
 - `staged`
 - `staged_Isendrecv`
+- `staged_Isendrecv_overlap` (attention benchmark only)
 - `cuda_aware`
 - `cuda_aware_Isendrecv`
+- `cuda_aware_Isendrecv_overlap` (attention benchmark only)
 - `nccl`
 
 The package now follows an external-launch model:
@@ -83,8 +85,9 @@ The default `config.example.env` is a good starting point:
 ```bash
 NP_LIST="2 4 8"
 COMM_SIZES="262144 524288 1048576 4194304 16777216"
-ATTENTION_SIZES="262144 524288 1048576 4194304"
+ATTENTION_SIZES="262144 524288 1048576"
 BACKENDS="staged staged_Isendrecv cuda_aware cuda_aware_Isendrecv nccl"
+ATTENTION_BACKENDS="staged staged_Isendrecv staged_Isendrecv_overlap cuda_aware cuda_aware_Isendrecv cuda_aware_Isendrecv_overlap nccl"
 WARMUP=10
 ITERS=100
 RUN_TYPES="comm attention"
@@ -96,6 +99,7 @@ This covers:
 - small and large message sizes
 - staged MPI vs CUDA-aware MPI vs NCCL
 - pure communication vs full attention
+- overlap-enabled attention variants without changing the comm-only suite
 
 ## External Launch Model
 
@@ -208,7 +212,8 @@ env NP=2 LAUNCHER=mpirun ./benchmark_attention.sh
 |----------|---------|---------|
 | `NP_LIST` | `2` | Rank counts to sweep from the outer launcher |
 | `RUN_TYPES` | `comm attention` | Benchmark families |
-| `BACKENDS` | all five backends | Which backends to run |
+| `BACKENDS` | five comm backends | Communication backends for `benchmark_comm.sh` |
+| `ATTENTION_BACKENDS` | seven attention backends | Attention backends for `benchmark_attention.sh` |
 | `COMM_SIZES` | see config | Sizes for communication benchmark |
 | `ATTENTION_SIZES` | see config | Sizes for attention benchmark |
 | `WARMUP` | `10` | Warmup iterations |
