@@ -192,11 +192,29 @@ void merge_online_softmax(
 }
 
 int main(int argc, char **argv){
-    MPI_Init(&argc, &argv);
+    int required = MPI_THREAD_FUNNELED;
+    int provided = 0;
+    int mpi_err = MPI_Init_thread(&argc, &argv, required, &provided);
+
+    if (mpi_err != MPI_SUCCESS) {
+        fprintf(stderr, "MPI_Init_thread failed\n");
+        return 1;
+    }
+
+    if (provided < required) {
+        fprintf(stderr, "MPI thread support too low: required=%d provided=%d\n",
+                required, provided);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
 
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (rank == 0) {
+        printf("MPI thread support: required=%d provided=%d\n",
+               required, provided);
+    }
 
     if(size < 2){
         if(rank == 0)
@@ -204,7 +222,6 @@ int main(int argc, char **argv){
         MPI_Finalize();
         return 1;
     }
-
     size_t kv_size_arg = 262144;
     int warmup = 10;
     int iters = 50;
