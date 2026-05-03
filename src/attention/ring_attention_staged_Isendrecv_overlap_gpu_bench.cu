@@ -472,6 +472,24 @@ int main(int argc, char **argv){
                sum_final / iters);
     }
 
+    if(getenv("ATTENTION_DUMP_OUTPUT") != NULL){
+        char fname[64];
+        snprintf(fname, sizeof(fname), "ring_output_rank%d.bin", rank);
+        FILE *fp = fopen(fname, "wb");
+        if(fp == NULL){
+            fprintf(stderr, "[Rank %d] failed to open %s for output\n", rank, fname);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        size_t output_elems = (size_t)seq_q * dim;
+        size_t written = fwrite(h_acc, sizeof(float), output_elems, fp);
+        fclose(fp);
+        if(written != output_elems){
+            fprintf(stderr, "[Rank %d] incomplete output dump to %s\n", rank, fname);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        printf("[Rank %d] output dumped to %s\n", rank, fname);
+    }
+
     free(Q);
     free(h_init);
     free(h_m_init);

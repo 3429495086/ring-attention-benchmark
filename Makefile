@@ -63,7 +63,7 @@ ATTENTION_EXES := \
 	$(BIN_DIR)/ring_attention_cuda_aware_Isendrecv_overlap_gpu_bench \
 	$(BIN_DIR)/ring_attention_nccl_gpu_bench
 
-.PHONY: all comm attention clean help print-config
+.PHONY: all comm attention check-attention-correctness clean help print-config
 
 all: comm attention
 	@echo "=== All benchmarks built ==="
@@ -73,6 +73,9 @@ comm: $(BIN_DIR) $(COMM_EXES)
 
 attention: $(BIN_DIR) $(ATTENTION_EXES)
 	@echo "=== Attention benchmarks built ==="
+
+check-attention-correctness:
+	./check_attention_correctness.sh
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -140,6 +143,7 @@ help:
 	@echo "  make all        - Build all benchmarks (default)"
 	@echo "  make comm       - Build communication-only benchmarks (loop)"
 	@echo "  make attention  - Build full attention benchmarks"
+	@echo "  make check-attention-correctness - Compare baseline and overlap attention outputs"
 	@echo "  make print-config - Show resolved compiler and library flags"
 	@echo "  make clean      - Remove all built files"
 	@echo "  make help       - Show this message"

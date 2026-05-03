@@ -194,6 +194,30 @@ env NP=2 LAUNCHER=mpirun ./benchmark_comm.sh
 env NP=2 LAUNCHER=mpirun ./benchmark_attention.sh
 ```
 
+## Attention Correctness Check
+
+Use this before collecting performance results on a new machine:
+
+```bash
+env NP=2 SIZE=262144 WARMUP=1 ITERS=1 LAUNCHER=mpirun \
+  ./check_attention_correctness.sh
+```
+
+The script compares:
+
+- `staged_Isendrecv` vs `staged_Isendrecv_overlap`
+- `cuda_aware_Isendrecv` vs `cuda_aware_Isendrecv_overlap`
+
+It temporarily enables `ATTENTION_DUMP_OUTPUT=1`, runs the baseline and overlap
+versions, saves `ring_output_rank*.bin` under `results/<run_label>/`, and prints
+`PASS` or `FAIL` with `max_abs_err`, `mean_abs_err`, and `max_rel_err`.
+
+You can also run it through Make:
+
+```bash
+make check-attention-correctness
+```
+
 ## Main Variables
 
 ### Preparation
